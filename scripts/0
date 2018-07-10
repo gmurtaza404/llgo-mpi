@@ -1,0 +1,8 @@
+
+define internal void @"main.main:main.main$1"(i8* nest) #0 {
+prologue:
+  br label %.0.entry
+
+.0.entry:                                         ; preds = %prologue
+  ret void
+}

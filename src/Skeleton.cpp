@@ -16,21 +16,51 @@
 #include <set>
 #include <string>
 #include <fstream>
+#include <queue>
 
 using namespace llvm;
 
+
+
 namespace {
 	struct SkeletonPass : public BasicBlockPass {
+		
 		static char ID;
-		int count;
+		int count = 0;
+		
 		std::unordered_map<Function*, int> functions;
 		SkeletonPass() : BasicBlockPass(ID) { count = 0;}
 
+		void getAllFunctions(Function* func, std::queue<Function*> &nestedCalls){
+			if(func->begin() == func->end()){
+				errs()<< "empty block";
+				return;
+			}
+			for (auto bb_start=func->begin(),bb_end = func->end(); bb_start != bb_end; bb_start++){
+				BasicBlock *bb = &*bb_start;
+				for (auto ins_start=bb->begin(),ins_end=bb->end();ins_end != ins_start; ins_start++){
+					Instruction *temp = &*ins_start;
+					if(CallInst *call_ins = dyn_cast<CallInst>(ins_start)){
+						//errs() << call_ins->getCalledFunction()->getName();
+						nestedCalls.push(call_ins->getCalledFunction());
+					}	
+				}
+			}
+		}
+
+		void writeFunctionOnaFile(Function* func,std::string fname){
+				// opening file
+				std::error_code eCode;
+				llvm::sys::fs::OpenFlags flag = llvm::sys::fs::F_RW;				
+				raw_fd_ostream file(StringRef(fname), eCode,flag);
+				func->print(file);
+				file.close();
+				return;
+		}
+		
 		virtual bool runOnBasicBlock(BasicBlock &B) {
-			//errs() << "I saw a function called " << F.getName() << "!\n";
 			for(auto it = B.begin(), end = B.end(); it != end; it++) {
 				Instruction *current = &*it;
-				//is func call, and __go_go
 				if (CallInst *call = dyn_cast<CallInst>(it)) {
 					if (call->getCalledFunction()->getName() != "__go_go")
 						continue;
@@ -45,26 +75,36 @@ namespace {
 					}
 				}
 			}
-			
+
 			for (auto it = functions.begin(), end = functions.end(); it != end; it++) {
-				//std::ofstream file;
- 				std::error_code temp;
-				llvm::sys::fs::OpenFlags flag = llvm::sys::fs::F_RW;	
- 				raw_fd_ostream file(StringRef("temp.ll"), temp,flag);
-				//file.open(std::to_string(count) + "temp.ll");
+				
+				std::unordered_map<Function*,int> visitedFunctions;
+				std::queue<Function*> funcQueue;
+
 				Function* f = &*(it->first);
-				for (auto bb_start = f->begin(), bb_end = f->end(); bb_start != bb_end; bb_start++) {
-					BasicBlock *bb = &*bb_start;
-					for(auto inst_start = bb->begin(), inst_end = bb->end(); inst_start != inst_end; inst_start++) {
-						std::string str;
-						Instruction *t = &*inst_start;
-						f->print(file);
-						//errs() << str;
-						//file << str;
+				getAllFunctions(f,funcQueue);
+				
+				// assuming no go calls in the go call.
+				while(!funcQueue.empty()){
+					Function* currentFunction = funcQueue.front();
+					funcQueue.pop();
+					auto tempIt = visitedFunctions.find(currentFunction);
+					if(tempIt == visitedFunctions.end()){
+						errs()<< "found a function \n";
+						// mark the function visited
+						visitedFunctions[currentFunction] = 0;
+						// get all the function calls of that functio
+						getAllFunctions(currentFunction,funcQueue);
+						
+						// write function to the file.
+						std::string fileName = std::to_string(count);
+						writeFunctionOnaFile(currentFunction,fileName);
+					}else{
+						// already visited
+						continue;
 					}
 				}
-				count++;
-				file.close();
+				errs() << visitedFunctions.size() << "\n";
 			}
 			return false;
 		}
