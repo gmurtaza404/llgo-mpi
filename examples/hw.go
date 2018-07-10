@@ -11,10 +11,7 @@ func hello() {
 func main() {
 	var i int = 0;
 	i = i + 1;
-	go func() {
-		var j int = 0;
-		j += 1;
-	}();
+	go hello();
 }
 
 

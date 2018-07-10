@@ -10,6 +10,10 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/ValueMap.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 #include <system_error>
 #include <unordered_map>
@@ -30,8 +34,10 @@ namespace {
 		static char ID;
 		int count;
 		const std::string goFuncName;	
+		const std::string mainFuncName;
+		LLVMContext llContext;
 
-		SkeletonPass() : BasicBlockPass(ID), goFuncName("__go_go") { 
+		SkeletonPass() : BasicBlockPass(ID), goFuncName("__go_go"), mainFuncName("main.main") { 
 			count = 0;
 		}
 
@@ -52,15 +58,12 @@ namespace {
 			}
 		}
 
-		void writeFunctionsToFile(std::unordered_map<Function*, int>& funcs, std::string fname){
+		void writeFile(Module *M, std::string fname){
 			// opening file
 			std::error_code eCode;
 			llvm::sys::fs::OpenFlags flag = llvm::sys::fs::F_RW;				
 			raw_fd_ostream file(StringRef(fname), eCode,flag);
-			for (auto it = funcs.begin(), end = funcs.end(); it != end; it++) {
-				Function* f = &*(it->first);
-				f->print(file);
-			}
+			M->print(file, NULL);
 			file.close();
 			return;
 		}
@@ -87,6 +90,7 @@ namespace {
 		void getFuncDependencies(Function* f, func_map &visitedFunctions) {
 			std::queue<Function*> funcQueue;
 
+			funcQueue.push(f);
 			getAllFunctions(f,funcQueue);
 			// assuming no go calls in the go call.
 			while(!funcQueue.empty()){
@@ -108,18 +112,65 @@ namespace {
 			}
 		}
 
+		void insertFuncCall(Function *caller, Function *callee) {
+			if (auto type = dyn_cast<PointerType>(callee->getFunctionType()->getParamType(0))) {
+				auto a = ArrayRef<Value*>(ConstantPointerNull::get(type));
+				Instruction *I = CallInst::Create(callee, a);
+				caller->getEntryBlock().getInstList().push_front(I);
+			}
+		}
+
+		void cloneAndInsertFunc(Function *old, Module* M) {
+			ValueToValueMapTy val_map;
+
+			Function *newF = Function::Create(old->getFunctionType(), GlobalValue::LinkageTypes::ExternalLinkage, old->getName(), M);	
+			createFuncValMap(newF, old, val_map);	
+			SmallVector<ReturnInst*, 8> returns;
+			CloneFunctionInto(newF, old, val_map, true, returns);
+		}
+
+		void createFuncValMap(Function* f, Function* old_f, ValueToValueMapTy& val_map) {
+			auto f_new = f->arg_begin();
+			for (auto t = old_f->arg_begin(), t_end = old_f->arg_end(); t != t_end; t++) {
+				val_map[&*t] = &*f_new;
+				f_new++;
+			}
+		}
+
+
+		Function* makeAndInsertMain(Module *M) {
+			FunctionType *funcType = FunctionType::get(Type::getVoidTy(llContext), ArrayRef<Type*>(), false);
+			Function *F = Function::Create(funcType, Function::InternalLinkage, this->mainFuncName, M);
+			BasicBlock *BB = BasicBlock::Create(llContext);
+			F->getBasicBlockList().push_front(BB);
+			return F;
+		}
+
+
 		virtual bool runOnBasicBlock(BasicBlock &B) {
 			std::unordered_map<Function*, int> functions;
-			
+
 			getGoFunction(B, functions);
 
-			errs() << functions.size();
 			for (auto it = functions.begin(), end = functions.end(); it != end; it++) {
 				std::unordered_map<Function*,int> dependencies;
 				getFuncDependencies(&*(it->first), dependencies);
 
 				std::string fileName = std::to_string(count);
-				writeFunctionsToFile(dependencies, fileName + ".ll");
+
+				Module *M = new Module(fileName + ".ll", llContext);
+				Function *entry;
+				for (auto i = dependencies.begin(), en = dependencies.end(); i != en; i++) {
+					cloneAndInsertFunc(&*(i->first), M);
+				}
+
+				for (auto i = M->begin(), en = M->end(); i != en; i++)
+					entry = (&*i)->getName() == (&*it->first)->getName() ? &*i : NULL;
+
+				Function *F = makeAndInsertMain(M);
+				//get cloned entry
+				insertFuncCall(F, entry);
+				writeFile(M, fileName + ".ll");
 				count++;
 			}
 
