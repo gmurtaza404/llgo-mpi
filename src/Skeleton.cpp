@@ -18,18 +18,22 @@
 #include <fstream>
 #include <queue>
 
+typedef std::unordered_map<llvm::Function*, int> func_map;
+
 using namespace llvm;
 
 
 
 namespace {
 	struct SkeletonPass : public BasicBlockPass {
-		
+
 		static char ID;
-		int count = 0;
-		
-		std::unordered_map<Function*, int> functions;
-		SkeletonPass() : BasicBlockPass(ID) { count = 0;}
+		int count;
+		const std::string goFuncName;	
+
+		SkeletonPass() : BasicBlockPass(ID), goFuncName("__go_go") { 
+			count = 0;
+		}
 
 		void getAllFunctions(Function* func, std::queue<Function*> &nestedCalls){
 			if(func->begin() == func->end()){
@@ -48,64 +52,77 @@ namespace {
 			}
 		}
 
-		void writeFunctionOnaFile(Function* func,std::string fname){
-				// opening file
-				std::error_code eCode;
-				llvm::sys::fs::OpenFlags flag = llvm::sys::fs::F_RW;				
-				raw_fd_ostream file(StringRef(fname), eCode,flag);
-				func->print(file);
-				file.close();
-				return;
+		void writeFunctionsToFile(std::unordered_map<Function*, int>& funcs, std::string fname){
+			// opening file
+			std::error_code eCode;
+			llvm::sys::fs::OpenFlags flag = llvm::sys::fs::F_RW;				
+			raw_fd_ostream file(StringRef(fname), eCode,flag);
+			for (auto it = funcs.begin(), end = funcs.end(); it != end; it++) {
+				Function* f = &*(it->first);
+				f->print(file);
+			}
+			file.close();
+			return;
 		}
-		
-		virtual bool runOnBasicBlock(BasicBlock &B) {
+
+		void getGoFunction(BasicBlock &B, std::unordered_map<Function*, int> &functions) {
 			for(auto it = B.begin(), end = B.end(); it != end; it++) {
 				Instruction *current = &*it;
 				if (CallInst *call = dyn_cast<CallInst>(it)) {
-					if (call->getCalledFunction()->getName() != "__go_go")
+					if (call->getCalledFunction()->getName() != this->goFuncName)
 						continue;
 					Function *called = call->getCalledFunction();
 					Value *temp = call->getArgOperand(1);
 					temp->dump();
-					errs() << temp->getName();
 					if (auto a = dyn_cast<ConstantExpr>(temp)) {
 						Value *val = a->getOperand(0);
-						if (auto asd =  dyn_cast<Function>(val))
+						if (auto asd =  dyn_cast<Function>(val)) {
 							functions[asd] = 0;
+						}
 					}
 				}
 			}
+		}
 
+		void getFuncDependencies(Function* f, func_map &visitedFunctions) {
+			std::queue<Function*> funcQueue;
+
+			getAllFunctions(f,funcQueue);
+			// assuming no go calls in the go call.
+			while(!funcQueue.empty()){
+				Function* currentFunction = funcQueue.front();
+				funcQueue.pop();
+				auto tempIt = visitedFunctions.find(currentFunction);
+				if(tempIt == visitedFunctions.end()){
+					errs()<< "found a function \n";
+					// mark the function visited
+					visitedFunctions[currentFunction] = 0;
+					// get all the function calls of that functio
+					getAllFunctions(currentFunction,funcQueue);
+
+					// write function to the file.
+				}else{
+					// already visited
+					continue;
+				}
+			}
+		}
+
+		virtual bool runOnBasicBlock(BasicBlock &B) {
+			std::unordered_map<Function*, int> functions;
+			
+			getGoFunction(B, functions);
+
+			errs() << functions.size();
 			for (auto it = functions.begin(), end = functions.end(); it != end; it++) {
-				
-				std::unordered_map<Function*,int> visitedFunctions;
-				std::queue<Function*> funcQueue;
+				std::unordered_map<Function*,int> dependencies;
+				getFuncDependencies(&*(it->first), dependencies);
 
-				Function* f = &*(it->first);
-				getAllFunctions(f,funcQueue);
-				
-				// assuming no go calls in the go call.
-				while(!funcQueue.empty()){
-					Function* currentFunction = funcQueue.front();
-					funcQueue.pop();
-					auto tempIt = visitedFunctions.find(currentFunction);
-					if(tempIt == visitedFunctions.end()){
-						errs()<< "found a function \n";
-						// mark the function visited
-						visitedFunctions[currentFunction] = 0;
-						// get all the function calls of that functio
-						getAllFunctions(currentFunction,funcQueue);
-						
-						// write function to the file.
-						std::string fileName = std::to_string(count);
-						writeFunctionOnaFile(currentFunction,fileName);
-					}else{
-						// already visited
-						continue;
-					}
-				}
-				errs() << visitedFunctions.size() << "\n";
+				std::string fileName = std::to_string(count);
+				writeFunctionsToFile(dependencies, fileName + ".ll");
+				count++;
 			}
+
 			return false;
 		}
 	};
