@@ -3,9 +3,14 @@
 
 package main;
 
+import (
+	"fmt"
+)
+
 func hello() {
 	var i int = 0;
 	i += 1;
+	fmt.Println("asd");
 }
 
 func main() {
